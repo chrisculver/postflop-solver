@@ -4,7 +4,7 @@ mod interpreter;
 mod node;
 
 #[cfg(feature = "bincode")]
-mod serialization;
+pub mod serialization;
 
 #[cfg(test)]
 mod tests;
