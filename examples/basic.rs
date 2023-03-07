@@ -133,4 +133,6 @@ fn main() {
 
     // back to the root node
     game.back_to_root();
+
+    game.save_to_file();
 }

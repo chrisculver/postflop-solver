@@ -34,6 +34,9 @@ pub trait Game: Send + Sync {
     #[doc(hidden)]
     fn is_solved(&self) -> bool;
 
+    #[doc(hidden)]
+    fn save_to_file(&self);
+
     /// Sets the instance to be solved.
     #[doc(hidden)]
     fn set_solved(&mut self);

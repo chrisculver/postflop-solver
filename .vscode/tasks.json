@@ -16,6 +16,14 @@
 				"$rustc"
 			],
 			"label": "cargo test"
-		}
+		},
+		{
+			"type": "shell",
+			"command": "cargo run --example basic",
+			"problemMatcher": [
+				"$rustc"
+			],
+			"label": "cargo example"
+		},
 	]
 }

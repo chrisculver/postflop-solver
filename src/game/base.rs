@@ -101,6 +101,22 @@ impl Game for PostFlopGame {
     fn is_compression_enabled(&self) -> bool {
         self.is_compression_enabled
     }
+
+    fn save_to_file(&self)
+    {
+        println!("Wow!");
+        println!("{:?}",self.available_actions());
+        for (h,hand) in self.private_cards(self.current_player()).iter().enumerate()
+        {
+            let mut hand_strategy = format!("{},{}:",hand.0,hand.1);
+            for (a,action) in self.available_actions().iter().enumerate()
+            {
+                hand_strategy += &format!("{:?}-{},",action,self.strategy()[a*self.num_private_hands(self.current_player())+h])
+            }
+            println!("{}",hand_strategy);
+        }
+        
+    }
 }
 
 impl PostFlopGame {
