@@ -2,6 +2,7 @@ use super::*;
 use crate::range::*;
 use crate::solver::*;
 use crate::utility::*;
+use crate::BunchingData;
 
 #[cfg(feature = "bincode")]
 use std::{
@@ -1013,6 +1014,136 @@ fn node_locking_isomorphism() {
         game.strategy(),
         vec![0.5, 0.5, 1.0, 0.5, 0.5, 0.5, 0.0, 0.5]
     );
+}
+
+#[test]
+fn set_bunching_effect() {
+    let flop = flop_from_str("Td9d6h").unwrap();
+    let card_config = CardConfig {
+        flop,
+        range: [Range::ones(); 2],
+        turn: card_from_str("Qc").unwrap(),
+        ..Default::default()
+    };
+
+    let tree_config = TreeConfig {
+        initial_state: BoardState::Turn,
+        starting_pot: 60,
+        effective_stack: 970,
+        river_bet_sizes: [("50%", "").try_into().unwrap(), Default::default()],
+        ..Default::default()
+    };
+
+    let action_tree = ActionTree::new(tree_config).unwrap();
+    let mut game = PostFlopGame::with_config(card_config, action_tree).unwrap();
+
+    let co_range = "33:0.59,22:0.635,A8o:0.265,A7o-A6o,A5o:0.445,A4o-A2o,K2s,K9o:0.905,K8o-K2o,Q4s-Q2s,Q9o-Q2o,J6s-J2s,J9o:0.88,J8o-J2o,T7s:0.405,T6s-T2s,T9o:0.96,T8o-T2o,96s-92s,92o+,86s:0.57,85s-82s,82o+,76s:0.37,75s-72s,72o+,65s:0.475,64s-62s,62o+,54s:0.68,53s-52s,52o+,42+,32";
+    let sb_range = "66:0.46,55:0.821,44:0.92,33:0.93,22:0.925,A6s:0.73,A3s:0.47,A2s,ATo:0.105,A9o-A2o,K8s:0.795,K7s,K6s:0.85,K5s:0.965,K4s-K2s,KJo:0.085,KTo:0.645,K9o-K2o,Q8s-Q2s,QJo:0.765,QTo-Q2o,J8s-J2s,J2o+,T8s:0.69,T7s-T2s,T2o+,98s:0.905,97s-92s,92o+,87s:0.78,86s-82s,82o+,76s:0.77,75s-72s,72o+,65s:0.845,64s-62s,62o+,54s:0.735,53s-52s,52o+,42+,32";
+
+    let mut bunching_data = BunchingData::new(
+        &[co_range.parse().unwrap(), sb_range.parse().unwrap()],
+        flop,
+    )
+    .unwrap();
+
+    bunching_data.process(false);
+    game.set_bunching_effect(&bunching_data).unwrap();
+
+    game.allocate_memory(false);
+    finalize(&mut game);
+
+    let current_ev = compute_current_ev(&game);
+    assert!((current_ev[0] - 7.5).abs() < 1e-4);
+    assert!((current_ev[1] - -7.5).abs() < 1e-4);
+
+    game.cache_normalized_weights();
+    let weights_oop = game.normalized_weights(0);
+    let weights_ip = game.normalized_weights(1);
+    let root_equity_oop = compute_average(&game.equity(0), weights_oop);
+    let root_equity_ip = compute_average(&game.equity(1), weights_ip);
+    let root_ev_oop = compute_average(&game.expected_values(0), weights_oop);
+    let root_ev_ip = compute_average(&game.expected_values(1), weights_ip);
+
+    assert!((root_equity_oop - 0.5).abs() < 1e-5);
+    assert!((root_equity_ip - 0.5).abs() < 1e-5);
+    assert!((root_ev_oop - 37.5).abs() < 1e-4);
+    assert!((root_ev_ip - 22.5).abs() < 1e-4);
+}
+
+#[test]
+fn set_bunching_effect_always_win() {
+    let flop = flop_from_str("AcAdKh").unwrap();
+    let lose_range_str = "KK-22,K9-K2,Q8-Q2,J8-J2,T8-T2,92+,82+,72+,62+";
+
+    let card_config = CardConfig {
+        range: ["AA".parse().unwrap(), lose_range_str.parse().unwrap()],
+        flop,
+        ..Default::default()
+    };
+
+    let tree_config = TreeConfig {
+        starting_pot: 60,
+        effective_stack: 970,
+        ..Default::default()
+    };
+
+    let action_tree = ActionTree::new(tree_config).unwrap();
+    let mut game = PostFlopGame::with_config(card_config, action_tree).unwrap();
+
+    let co_range = "33:0.59,22:0.635,A8o:0.265,A7o-A6o,A5o:0.445,A4o-A2o,K2s,K9o:0.905,K8o-K2o,Q4s-Q2s,Q9o-Q2o,J6s-J2s,J9o:0.88,J8o-J2o,T7s:0.405,T6s-T2s,T9o:0.96,T8o-T2o,96s-92s,92o+,86s:0.57,85s-82s,82o+,76s:0.37,75s-72s,72o+,65s:0.475,64s-62s,62o+,54s:0.68,53s-52s,52o+,42+,32";
+    let sb_range = "66:0.46,55:0.821,44:0.92,33:0.93,22:0.925,A6s:0.73,A3s:0.47,A2s,ATo:0.105,A9o-A2o,K8s:0.795,K7s,K6s:0.85,K5s:0.965,K4s-K2s,KJo:0.085,KTo:0.645,K9o-K2o,Q8s-Q2s,QJo:0.765,QTo-Q2o,J8s-J2s,J2o+,T8s:0.69,T7s-T2s,T2o+,98s:0.905,97s-92s,92o+,87s:0.78,86s-82s,82o+,76s:0.77,75s-72s,72o+,65s:0.845,64s-62s,62o+,54s:0.735,53s-52s,52o+,42+,32";
+
+    let mut bunching_data = BunchingData::new(
+        &[co_range.parse().unwrap(), sb_range.parse().unwrap()],
+        flop,
+    )
+    .unwrap();
+
+    bunching_data.process(false);
+    game.set_bunching_effect(&bunching_data).unwrap();
+
+    game.allocate_memory(false);
+    finalize(&mut game);
+
+    let current_ev = compute_current_ev(&game);
+    assert!((current_ev[0] - 30.0).abs() < 1e-4);
+    assert!((current_ev[1] - -30.0).abs() < 1e-4);
+
+    game.cache_normalized_weights();
+    let weights_oop = game.normalized_weights(0);
+    let weights_ip = game.normalized_weights(1);
+    let equity_oop = compute_average(&game.equity(0), weights_oop);
+    let equity_ip = compute_average(&game.equity(1), weights_ip);
+    let ev_oop = compute_average(&game.expected_values(0), weights_oop);
+    let ev_ip = compute_average(&game.expected_values(1), weights_ip);
+    assert!((equity_oop - 1.0).abs() < 1e-5);
+    assert!((equity_ip - 0.0).abs() < 1e-5);
+    assert!((ev_oop - 60.0).abs() < 1e-4);
+    assert!((ev_ip - 0.0).abs() < 1e-4);
+
+    game.play(0);
+    game.play(0);
+    assert!(game.is_chance_node());
+    game.play(usize::MAX);
+    game.play(0);
+    game.play(0);
+    assert!(game.is_chance_node());
+    game.play(usize::MAX);
+    game.play(0);
+    game.play(0);
+    assert!(game.is_terminal_node());
+
+    game.cache_normalized_weights();
+    let weights_oop = game.normalized_weights(0);
+    let weights_ip = game.normalized_weights(1);
+    let equity_oop = compute_average(&game.equity(0), weights_oop);
+    let equity_ip = compute_average(&game.equity(1), weights_ip);
+    let ev_oop = compute_average(&game.expected_values(0), weights_oop);
+    let ev_ip = compute_average(&game.expected_values(1), weights_ip);
+    assert!((equity_oop - 1.0).abs() < 1e-5);
+    assert!((equity_ip - 0.0).abs() < 1e-5);
+    assert!((ev_oop - 60.0).abs() < 1e-4);
+    assert!((ev_ip - 0.0).abs() < 1e-4);
 }
 
 #[test]

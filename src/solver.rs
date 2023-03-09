@@ -4,7 +4,6 @@ use crate::sliceop::*;
 use crate::utility::*;
 use std::io::{self, Write};
 use std::mem::MaybeUninit;
-use std::ptr;
 
 #[cfg(feature = "custom-alloc")]
 use crate::alloc::*;
@@ -174,7 +173,7 @@ fn solve_recursive<T: Game>(
         mul_slice_scalar_uninit(
             cfreach_updated.spare_capacity_mut(),
             cfreach,
-            node.chance_factor(),
+            1.0 / game.chance_factor(node) as f32,
         );
         unsafe { cfreach_updated.set_len(cfreach.len()) };
 
@@ -210,27 +209,13 @@ fn solve_recursive<T: Game>(
             let swap_list = &game.isomorphic_swap(node, i)[player];
             let tmp = row_mut(&mut cfv_actions, isomorphic_index as usize, num_hands);
 
-            for &(i, j) in swap_list {
-                unsafe {
-                    ptr::swap(
-                        tmp.get_unchecked_mut(i as usize),
-                        tmp.get_unchecked_mut(j as usize),
-                    );
-                }
-            }
+            apply_swap(tmp, swap_list);
 
             result_f64.iter_mut().zip(&*tmp).for_each(|(r, &v)| {
                 *r += v as f64;
             });
 
-            for &(i, j) in swap_list {
-                unsafe {
-                    ptr::swap(
-                        tmp.get_unchecked_mut(i as usize),
-                        tmp.get_unchecked_mut(j as usize),
-                    );
-                }
-            }
+            apply_swap(tmp, swap_list);
         }
 
         result.iter_mut().zip(&result_f64).for_each(|(r, &v)| {
