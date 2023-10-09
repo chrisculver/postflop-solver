@@ -531,7 +531,10 @@ impl Range {
     /// Inverts the range.
     #[inline]
     pub fn invert(&mut self) {
-        self.data.iter_mut().for_each(|el| *el = 1.0 - *el);
+        // we want to obtain 0.1 when the previous value was 0.9, not 0.100000024
+        self.data
+            .iter_mut()
+            .for_each(|el| *el = (1.0 - el.to_string().parse::<f64>().unwrap()) as f32);
     }
 
     /// Obtains the weight of a specified hand.
@@ -617,6 +620,12 @@ impl Range {
     #[inline]
     pub fn set_weight_offsuit(&mut self, rank1: u8, rank2: u8, weight: f32) {
         self.set_weight(&offsuit_indices(rank1, rank2), weight);
+    }
+
+    /// Returns whether the range is valid, i.e., all weights are in the range `[0.0, 1.0]`.
+    #[inline]
+    pub(crate) fn is_valid(&self) -> bool {
+        self.data.iter().all(|el| (0.0..=1.0).contains(el))
     }
 
     /// Returns whether the all suits are symmetric.

@@ -2,6 +2,10 @@ use crate::atomic_float::*;
 use crate::range::*;
 use crate::utility::*;
 use std::io::{self, Write};
+use std::mem;
+
+#[cfg(feature = "bincode")]
+use bincode::{Decode, Encode};
 
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
@@ -66,7 +70,7 @@ const COMB_TABLE: [[usize; 49]; 8] = [
 /// A configuration for computing the bunching effect.
 ///
 /// # Examples
-/// ```ignore
+/// ```no_run
 /// use postflop_solver::*;
 ///
 /// let utg_range_str = "...";
@@ -103,6 +107,7 @@ const COMB_TABLE: [[usize; 49]; 8] = [
 /// | 2 | 1.77MB |
 /// | 3 | 123MB |
 /// | 4 | 3.42GB |
+#[cfg_attr(feature = "bincode", derive(Decode, Encode))]
 pub struct BunchingData {
     // input
     fold_ranges: Vec<Range>,
@@ -240,6 +245,29 @@ impl BunchingData {
     #[inline]
     pub fn progress_percent(&self) -> u8 {
         self.progress_percent
+    }
+
+    /// Returns the memory usage in bytes.
+    #[inline]
+    pub fn memory_usage(&self) -> u64 {
+        let mut sum = 0;
+
+        sum += mem::size_of::<Self>() as u64;
+
+        sum += vec_memory_usage(&self.fold_ranges);
+        sum += vec_memory_usage(&self.temp_table1);
+        sum += vec_memory_usage(&self.temp_table2);
+        sum += vec_memory_usage(&self.temp_table3);
+
+        for vec in &self.sum {
+            sum += vec_memory_usage(vec);
+        }
+
+        sum += vec_memory_usage(&self.result4);
+        sum += vec_memory_usage(&self.result5);
+        sum += vec_memory_usage(&self.result6);
+
+        sum
     }
 
     /// Processes all phases.
@@ -668,7 +696,7 @@ impl BunchingData {
         let end_index = (src_len as f64 * (self.progress_percent + 1) as f64 / 100.0) as usize;
 
         let num_ones = (0u32..(1 << K) - 1)
-            .map(|x| x.count_ones() as u8)
+            .map(|i| i.count_ones() as u8)
             .collect::<Vec<_>>();
 
         into_par_iter(start_index..end_index)
@@ -745,7 +773,7 @@ impl BunchingData {
                         mask_bit[i] = lsb;
                     }
 
-                    let mut ret = 0.0;
+                    let mut result = 0.0;
 
                     for &(i, k) in &indices {
                         let mut src_mask = 0;
@@ -757,13 +785,13 @@ impl BunchingData {
 
                         let src_index = mask_to_index(src_mask, k as usize);
                         if k & 1 == 0 {
-                            ret += self.sum[k as usize][src_index].load();
+                            result += self.sum[k as usize][src_index].load();
                         } else {
-                            ret -= self.sum[k as usize][src_index].load();
+                            result -= self.sum[k as usize][src_index].load();
                         }
                     }
 
-                    dst_table[dst_index].store(f32::max(ret as f32, 0.0));
+                    dst_table[dst_index].store(f32::max(result as f32, 0.0));
                 }
             });
     }

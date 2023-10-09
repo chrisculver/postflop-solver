@@ -46,7 +46,7 @@ impl Game for PostFlopGame {
         if self.bunching_num_dead_cards == 0 {
             self.evaluate_internal(result, node, player, cfreach);
         } else {
-            self.evaluate_bunching_internal(result, node, player, cfreach);
+            self.evaluate_internal_bunching(result, node, player, cfreach);
         }
     }
 
@@ -154,6 +154,8 @@ impl PostFlopGame {
         card_config: CardConfig,
         action_tree: ActionTree,
     ) -> Result<(), String> {
+        self.state = State::ConfigError;
+
         if !action_tree.invalid_terminals().is_empty() {
             return Err("Invalid terminal is found in action tree".to_string());
         }
@@ -166,10 +168,13 @@ impl PostFlopGame {
             self.action_root,
         ) = action_tree.eject();
 
-        self.state = State::ConfigError;
-
         self.check_card_config()?;
-        self.init()?;
+        self.init_card_fields();
+        self.init_root()?;
+
+        self.state = State::TreeBuilt;
+
+        self.init_interpreter();
         self.reset_bunching_effect();
 
         Ok(())
@@ -200,7 +205,7 @@ impl PostFlopGame {
         Ok(())
     }
 
-    /// Resets the bunching effect configuration.
+    /// Resets the bunching effect configuration. The current node will also be reset to the root.
     #[inline]
     pub fn reset_bunching_effect(&mut self) {
         self.bunching_num_dead_cards = 0;
@@ -212,6 +217,7 @@ impl PostFlopGame {
         self.bunching_num_river = Default::default();
         self.bunching_coef_flop = Default::default();
         self.bunching_coef_turn = Default::default();
+        self.back_to_root();
     }
 
     /// Obtains the card configuration.
@@ -348,7 +354,7 @@ impl PostFlopGame {
     }
 
     /// Checks the card configuration.
-    fn check_card_config(&mut self) -> Result<(), String> {
+    pub(crate) fn check_card_config(&mut self) -> Result<(), String> {
         let config = &self.card_config;
         let (flop, turn, river) = (config.flop, config.turn, config.river);
         let range = &config.range;
@@ -422,6 +428,14 @@ impl PostFlopGame {
             return Err("IP range is empty".to_string());
         }
 
+        if !range[0].is_valid() {
+            return Err("OOP range is invalid (loaded broken data?)".to_string());
+        }
+
+        if !range[1].is_valid() {
+            return Err("IP range is invalid (loaded broken data?)".to_string());
+        }
+
         self.init_hands();
         self.num_combinations = 0.0;
 
@@ -450,7 +464,7 @@ impl PostFlopGame {
 
     /// Initializes fields `initial_weights` and `private_cards`.
     #[inline]
-    pub(super) fn init_hands(&mut self) {
+    fn init_hands(&mut self) {
         let config = &self.card_config;
         let (flop, turn, river) = (config.flop, config.turn, config.river);
         let range = &config.range;
@@ -468,15 +482,6 @@ impl PostFlopGame {
             self.initial_weights[player] = weights;
             self.private_cards[player] = hands;
         }
-    }
-
-    /// Initializes the game.
-    #[inline]
-    fn init(&mut self) -> Result<(), String> {
-        self.init_card_fields();
-        self.init_root()?;
-        self.init_interpreter();
-        Ok(())
     }
 
     /// Initializes fields related to cards.
@@ -554,8 +559,6 @@ impl PostFlopGame {
         self.num_storage_chance = info.num_storage_chance;
         self.misc_memory_usage = self.memory_usage_internal();
 
-        self.state = State::TreeBuilt;
-
         Ok(())
     }
 
@@ -570,8 +573,6 @@ impl PostFlopGame {
         self.weights = vecs.clone();
         self.normalized_weights = vecs.clone();
         self.cfvalues_cache = vecs;
-
-        self.back_to_root();
     }
 
     /// Clears the storage.
@@ -815,8 +816,8 @@ impl PostFlopGame {
                 }
 
                 let mut ret = [
-                    vec![0; self.private_cards[0].len()],
-                    vec![0; self.private_cards[1].len()],
+                    vec![0; self.num_private_hands(0)],
+                    vec![0; self.num_private_hands(1)],
                 ];
 
                 for player in 0..2 {
@@ -839,10 +840,10 @@ impl PostFlopGame {
 
                 for &(c1, c2) in player_cards {
                     indices.push(arena.len());
-                    let player_mask = (1 << c1) | (1 << c2);
+                    let player_mask: u64 = (1 << c1) | (1 << c2);
 
                     for &(c3, c4) in opponent_cards {
-                        let opponent_mask = (1 << c3) | (1 << c4);
+                        let opponent_mask: u64 = (1 << c3) | (1 << c4);
                         if player_mask & opponent_mask != 0 {
                             arena.push(0.0);
                         } else {
@@ -855,6 +856,7 @@ impl PostFlopGame {
                 if player == 0 {
                     self.bunching_num_combinations = arena.iter().fold(0.0, |a, &x| a + x as f64);
                     if self.bunching_num_combinations == 0.0 {
+                        self.reset_bunching_effect();
                         return Err("Valid combination not found".to_string());
                     }
                 }
@@ -874,7 +876,7 @@ impl PostFlopGame {
 
                 let buf = into_par_iter(0..52)
                     .map(|turn| {
-                        let bit_turn = 1 << turn;
+                        let bit_turn: u64 = 1 << turn;
                         if bit_turn & (flop_mask | skip_turn_mask) != 0
                             || (self.card_config.turn != NOT_DEALT
                                 && self.card_config.turn != turn as u8)
@@ -885,7 +887,7 @@ impl PostFlopGame {
                         let mut outer = Vec::with_capacity(player_cards.len());
 
                         for &(c1, c2) in player_cards {
-                            let player_mask = (1 << c1) | (1 << c2);
+                            let player_mask: u64 = (1 << c1) | (1 << c2);
                             if player_mask & bit_turn != 0 {
                                 outer.push(Vec::new());
                                 continue;
@@ -893,7 +895,7 @@ impl PostFlopGame {
 
                             let mut inner = Vec::with_capacity(opponent_cards.len());
                             for &(c3, c4) in opponent_cards {
-                                let opponent_mask = (1 << c3) | (1 << c4);
+                                let opponent_mask: u64 = (1 << c3) | (1 << c4);
                                 if (player_mask | bit_turn) & opponent_mask != 0 {
                                     inner.push(0.0);
                                 } else {
@@ -914,6 +916,7 @@ impl PostFlopGame {
                 if self.card_config.turn != NOT_DEALT && player == 0 {
                     self.bunching_num_combinations = arena.iter().fold(0.0, |a, &x| a + x as f64);
                     if self.bunching_num_combinations == 0.0 {
+                        self.reset_bunching_effect();
                         return Err("Valid combination not found".to_string());
                     }
                 }
@@ -921,8 +924,8 @@ impl PostFlopGame {
         }
 
         let is_board_possible = |turn: u8, river: u8| {
-            let bit_turn = 1 << turn;
-            let bit_river = 1 << river;
+            let bit_turn: u64 = 1 << turn;
+            let bit_river: u64 = 1 << river;
             let iso_card = &self.isomorphism_card_river[turn as usize & 3];
 
             bit_turn & (flop_mask | skip_turn_mask) == 0
@@ -944,11 +947,11 @@ impl PostFlopGame {
                         return Vec::new();
                     }
 
-                    let board_mask = (1 << board1) | (1 << board2);
+                    let board_mask: u64 = (1 << board1) | (1 << board2);
                     let mut outer = Vec::with_capacity(player_cards.len());
 
                     for &(c1, c2) in player_cards {
-                        let player_mask = (1 << c1) | (1 << c2);
+                        let player_mask: u64 = (1 << c1) | (1 << c2);
                         if player_mask & board_mask != 0 {
                             outer.push(Vec::new());
                             continue;
@@ -956,7 +959,7 @@ impl PostFlopGame {
 
                         let mut inner = Vec::with_capacity(opponent_cards.len());
                         for &(c3, c4) in opponent_cards {
-                            let opponent_mask = (1 << c3) | (1 << c4);
+                            let opponent_mask: u64 = (1 << c3) | (1 << c4);
                             if (player_mask | board_mask) & opponent_mask != 0 {
                                 inner.push(0.0);
                             } else {
@@ -977,6 +980,7 @@ impl PostFlopGame {
             if self.card_config.river != NOT_DEALT && player == 0 {
                 self.bunching_num_combinations = arena.iter().fold(0.0, |a, &x| a + x as f64);
                 if self.bunching_num_combinations == 0.0 {
+                    self.reset_bunching_effect();
                     return Err("Valid combination not found".to_string());
                 }
             }
@@ -984,6 +988,7 @@ impl PostFlopGame {
 
         if self.card_config.river != NOT_DEALT {
             self.bunching_arena = arena;
+            self.assign_zero_weights();
             return Ok(());
         }
 
@@ -996,7 +1001,7 @@ impl PostFlopGame {
 
             let buf = into_par_iter(0..52)
                 .map(|turn| {
-                    let bit_turn = 1 << turn;
+                    let bit_turn: u64 = 1 << turn;
                     if bit_turn & (flop_mask | skip_turn_mask) != 0
                         || (self.card_config.turn != NOT_DEALT
                             && self.card_config.turn != turn as u8)
@@ -1007,7 +1012,7 @@ impl PostFlopGame {
                     let mut outer = Vec::with_capacity(player_len);
 
                     for &(c1, c2) in player_cards {
-                        let player_mask = (1 << c1) | (1 << c2);
+                        let player_mask: u64 = (1 << c1) | (1 << c2);
                         if player_mask & bit_turn != 0 {
                             outer.push(Vec::new());
                         } else {
@@ -1021,7 +1026,7 @@ impl PostFlopGame {
                     let iso_swap = &self.isomorphism_swap_river[turn & 3];
 
                     for river in 0..52 {
-                        let bit_river = 1 << river;
+                        let bit_river: u64 = 1 << river;
                         if bit_river & (flop_mask | bit_turn) != 0 {
                             continue;
                         }
@@ -1098,6 +1103,7 @@ impl PostFlopGame {
 
         if self.card_config.turn != NOT_DEALT {
             self.bunching_arena = arena;
+            self.assign_zero_weights();
             return Ok(());
         }
 
@@ -1112,7 +1118,7 @@ impl PostFlopGame {
             let mut children = Vec::with_capacity(49);
 
             for turn in 0..52 {
-                let bit_turn = 1 << turn;
+                let bit_turn: u64 = 1 << turn;
                 if bit_turn & flop_mask != 0 {
                     continue;
                 }
@@ -1175,6 +1181,7 @@ impl PostFlopGame {
         }
 
         self.bunching_arena = arena;
+        self.assign_zero_weights();
         Ok(())
     }
 
@@ -1182,17 +1189,16 @@ impl PostFlopGame {
     fn memory_usage_bunching_internal(&self) -> u64 {
         let mut ret = 4;
 
+        let oop_len = self.num_private_hands(0);
+        let ip_len = self.num_private_hands(1);
+
         // hand strength
         self.hand_strength.iter().for_each(|strength| {
             ret += mem::size_of::<[Vec<u16>; 2]>() as u64;
             if !strength[0].is_empty() {
-                ret += 2 * self.private_cards[0].len() as u64;
-                ret += 2 * self.private_cards[1].len() as u64;
+                ret += 2 * (oop_len + ip_len) as u64;
             }
         });
-
-        let oop_len = self.private_cards[0].len();
-        let ip_len = self.private_cards[1].len();
 
         // flop num combinations / equity coefficients
         if self.card_config.turn == NOT_DEALT {
@@ -1214,7 +1220,7 @@ impl PostFlopGame {
                 ret += 2 * 52 * mem::size_of::<Vec<usize>>() as u64;
 
                 for turn in 0..52 {
-                    let bit_turn = 1 << turn;
+                    let bit_turn: u64 = 1 << turn;
                     if bit_turn & (flop_mask | skip_turn_mask) != 0
                         || (self.card_config.turn != NOT_DEALT
                             && self.card_config.turn != turn as u8)
@@ -1225,7 +1231,7 @@ impl PostFlopGame {
                     ret += 2 * (player_len * mem::size_of::<usize>()) as u64;
 
                     for &(c1, c2) in player_cards {
-                        let player_mask = (1 << c1) | (1 << c2);
+                        let player_mask: u64 = (1 << c1) | (1 << c2);
                         if player_mask & bit_turn == 0 {
                             ret += 2 * 4 * opponent_len as u64;
                         }
@@ -1235,8 +1241,8 @@ impl PostFlopGame {
         }
 
         let is_board_possible = |turn: u8, river: u8| {
-            let bit_turn = 1 << turn;
-            let bit_river = 1 << river;
+            let bit_turn: u64 = 1 << turn;
+            let bit_river: u64 = 1 << river;
             let iso_card = &self.isomorphism_card_river[turn as usize & 3];
 
             bit_turn & (flop_mask | skip_turn_mask) == 0
@@ -1261,11 +1267,11 @@ impl PostFlopGame {
                     continue;
                 }
 
-                let board_mask = (1 << board1) | (1 << board2);
+                let board_mask: u64 = (1 << board1) | (1 << board2);
                 ret += (player_len * mem::size_of::<usize>()) as u64;
 
                 for &(c1, c2) in player_cards {
-                    let player_mask = (1 << c1) | (1 << c2);
+                    let player_mask: u64 = (1 << c1) | (1 << c2);
                     if player_mask & board_mask == 0 {
                         ret += 4 * opponent_len as u64;
                     }

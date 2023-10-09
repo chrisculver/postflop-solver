@@ -7,15 +7,7 @@ use crate::utility::*;
 #[inline]
 fn decode_signed_slice(slice: &[i16], scale: f32) -> Vec<f32> {
     let decoder = scale / i16::MAX as f32;
-    let mut result = Vec::<f32>::with_capacity(slice.len());
-    let ptr = result.as_mut_ptr();
-    unsafe {
-        for i in 0..slice.len() {
-            *ptr.add(i) = (*slice.get_unchecked(i)) as f32 * decoder;
-        }
-        result.set_len(slice.len());
-    }
-    result
+    slice.iter().map(|&x| x as f32 * decoder).collect()
 }
 
 impl PostFlopGame {
@@ -38,6 +30,7 @@ impl PostFlopGame {
 
         self.weights[0].copy_from_slice(&self.initial_weights[0]);
         self.weights[1].copy_from_slice(&self.initial_weights[1]);
+        self.assign_zero_weights();
     }
 
     /// Returns the history of the current node.
@@ -130,9 +123,6 @@ impl PostFlopGame {
     /// The `i`-th bit is set to 1 if the card of ID `i` may be dealt.
     /// If the current node is not a chance node, returns `0`.
     ///
-    /// Note: If the bunching effect is enabled, this method may incorrectly include some dead
-    /// cards.
-    ///
     /// Card ID: `"2c"` => `0`, `"2d"` => `1`, `"2h"` => `2`, ..., `"As"` => `51`.
     pub fn possible_cards(&self) -> u64 {
         if self.state <= State::Uninitialized {
@@ -145,28 +135,96 @@ impl PostFlopGame {
 
         let flop = self.card_config.flop;
         let mut board_mask: u64 = (1 << flop[0]) | (1 << flop[1]) | (1 << flop[2]);
-        if self.turn != NOT_DEALT {
-            board_mask |= 1 << self.turn;
-        }
+        let mut dead_mask: u64 = 0;
 
-        let mut mask: u64 = (1 << 52) - 1;
+        // no bunching
+        if self.bunching_num_dead_cards == 0 {
+            if self.turn != NOT_DEALT {
+                board_mask |= 1 << self.turn;
+            }
 
-        for &(c1, c2) in &self.private_cards[0] {
-            let oop_mask: u64 = (1 << c1) | (1 << c2);
-            if board_mask & oop_mask == 0 {
-                for &(c3, c4) in &self.private_cards[1] {
-                    let ip_mask: u64 = (1 << c3) | (1 << c4);
-                    if (board_mask | oop_mask) & ip_mask == 0 {
-                        mask &= oop_mask | ip_mask;
+            'outer: for card in 0..52 {
+                let bit_card: u64 = 1 << card;
+                let new_board_mask = board_mask | bit_card;
+
+                if new_board_mask != board_mask {
+                    for &(c1, c2) in &self.private_cards[0] {
+                        let oop_mask: u64 = (1 << c1) | (1 << c2);
+                        if oop_mask & new_board_mask != 0 {
+                            continue;
+                        }
+                        let combined_mask = oop_mask | new_board_mask;
+                        for &(c3, c4) in &self.private_cards[1] {
+                            let ip_mask: u64 = (1 << c3) | (1 << c4);
+                            if ip_mask & combined_mask == 0 {
+                                continue 'outer;
+                            }
+                        }
                     }
                 }
-                if mask == 0 {
-                    break;
+
+                dead_mask |= bit_card;
+            }
+        }
+        // bunching
+        else {
+            let node_turn = self.node().turn;
+            if node_turn != NOT_DEALT {
+                board_mask |= 1 << node_turn;
+            }
+
+            let ip_len = self.num_private_hands(1);
+            let mut children = Vec::new();
+            let (iso_ref, iso_card) = if node_turn == NOT_DEALT {
+                (&self.isomorphism_ref_turn, &self.isomorphism_card_turn)
+            } else {
+                (
+                    &self.isomorphism_ref_river[node_turn as usize],
+                    &self.isomorphism_card_river[node_turn as usize & 3],
+                )
+            };
+
+            'outer: for card in 0..52 {
+                let bit_card: u64 = 1 << card;
+                let new_board_mask = board_mask | bit_card;
+
+                if let Some(pos) = iso_card.iter().position(|&c| c == card) {
+                    let ref_card = children[iso_ref[pos] as usize];
+                    dead_mask |= ((dead_mask >> ref_card) & 1) << card;
+                    continue;
                 }
+
+                if new_board_mask != board_mask {
+                    children.push(card);
+                    let indices = if node_turn == NOT_DEALT {
+                        &self.bunching_num_turn[0][card as usize]
+                    } else {
+                        &self.bunching_num_river[0][card_pair_to_index(node_turn, card)]
+                    };
+                    for &index in indices {
+                        if index == 0 {
+                            continue;
+                        }
+                        let slice = &self.bunching_arena[index..index + ip_len];
+                        if slice.iter().any(|&n| n > 0.0) {
+                            continue 'outer;
+                        }
+                    }
+                }
+
+                dead_mask |= bit_card;
+            }
+
+            if let Some((suit1, suit2)) = self.turn_swapped_suit {
+                let suit_mask: u64 = 0x1_1111_1111_1111;
+                let mod_mask = (suit_mask << suit1) | (suit_mask << suit2);
+                let swapped1 = ((dead_mask >> suit1) & suit_mask) << suit2;
+                let swapped2 = ((dead_mask >> suit2) & suit_mask) << suit1;
+                dead_mask = (dead_mask & !mod_mask) | swapped1 | swapped2;
             }
         }
 
-        ((1 << 52) - 1) ^ (board_mask | mask)
+        ((1 << 52) - 1) ^ dead_mask
     }
 
     /// Returns the current player (0 = OOP, 1 = IP).
@@ -267,7 +325,11 @@ impl PostFlopGame {
             if action_index == usize::MAX {
                 let node = self.node();
                 let isomorphism = self.isomorphic_chances(&node);
-                let isomorphic_cards = self.isomorphic_cards(&node);
+                let isomorphic_cards = if node.turn == NOT_DEALT {
+                    &self.isomorphism_card_turn
+                } else {
+                    &self.isomorphism_card_river[node.turn as usize & 3]
+                };
                 for (i, &repr_index) in isomorphism.iter().enumerate() {
                     if action_card == isomorphic_cards[i] {
                         action_index = repr_index as usize;
@@ -296,18 +358,6 @@ impl PostFlopGame {
                 panic!("Invalid action");
             }
 
-            // update the weights
-            for player in 0..2 {
-                self.weights[player]
-                    .iter_mut()
-                    .zip(self.private_cards[player].iter())
-                    .for_each(|(w, &(c1, c2))| {
-                        if c1 == actual_card || c2 == actual_card {
-                            *w = 0.0;
-                        }
-                    });
-            }
-
             // update the state
             let node_index = self.node_index(&self.node().play(action_index));
             self.node_history.push(node_index);
@@ -316,6 +366,9 @@ impl PostFlopGame {
             } else {
                 self.river = actual_card;
             }
+
+            // update the weights
+            self.assign_zero_weights();
         }
         // player node
         else {
@@ -338,7 +391,6 @@ impl PostFlopGame {
             // cache the counterfactual values
             let node = self.node();
             let vec = if self.is_compression_enabled {
-                let node = node;
                 let slice = row(node.cfvalues_compressed(), action, num_hands);
                 let scale = node.cfvalue_scale();
                 decode_signed_slice(slice, scale)
@@ -479,13 +531,14 @@ impl PostFlopGame {
                     &self.bunching_num_flop[player]
                 };
 
-                let opponent_len = self.private_cards[player ^ 1].len();
+                let opponent_len = self.num_private_hands(player ^ 1);
                 let mut normalized_weights = indices
                     .iter()
-                    .map(|&index| {
+                    .zip(weights[player].iter())
+                    .map(|(&index, &w)| {
                         if index != 0 {
                             let slice = &self.bunching_arena[index..index + opponent_len];
-                            inner_product(&weights[player ^ 1], slice)
+                            w * inner_product(&weights[player ^ 1], slice)
                         } else {
                             0.0
                         }
@@ -578,7 +631,9 @@ impl PostFlopGame {
             }
             tmp.into_iter().map(|v| v as f32).collect()
         } else {
-            self.equity_bunching_internal(player)
+            let mut tmp = self.equity_internal_bunching(player);
+            self.apply_swap(&mut tmp, player, false);
+            tmp
         };
 
         tmp.iter()
@@ -936,13 +991,79 @@ impl PostFlopGame {
         unsafe { node_ptr.offset_from(self.node_arena.as_ptr()) as usize }
     }
 
-    /// Returns a card list of isomorphic chances.
-    #[inline]
-    fn isomorphic_cards(&self, node: &PostFlopNode) -> &[u8] {
-        if node.turn == NOT_DEALT {
-            &self.isomorphism_card_turn
+    /// Assigns zero weights to the hands that are not possible.
+    pub(super) fn assign_zero_weights(&mut self) {
+        if self.bunching_num_dead_cards == 0 {
+            let mut board_mask: u64 = 0;
+            if self.turn != NOT_DEALT {
+                board_mask |= 1 << self.turn;
+            }
+            if self.river != NOT_DEALT {
+                board_mask |= 1 << self.river;
+            }
+
+            for player in 0..2 {
+                let mut dead_mask: u64 = (1 << 52) - 1;
+
+                for &(c1, c2) in &self.private_cards[player ^ 1] {
+                    let mask: u64 = (1 << c1) | (1 << c2);
+                    if mask & board_mask == 0 {
+                        dead_mask &= mask;
+                    }
+                    if dead_mask == 0 {
+                        break;
+                    }
+                }
+
+                dead_mask |= board_mask;
+
+                self.private_cards[player]
+                    .iter()
+                    .zip(self.weights[player].iter_mut())
+                    .for_each(|(&(c1, c2), w)| {
+                        let mask: u64 = (1 << c1) | (1 << c2);
+                        if mask & dead_mask != 0 {
+                            *w = 0.0;
+                        }
+                    });
+            }
         } else {
-            &self.isomorphism_card_river[node.turn as usize & 3]
+            for player in 0..2 {
+                let node = self.node();
+                let opponent_len = self.num_private_hands(player ^ 1);
+                let indices = if node.turn == NOT_DEALT {
+                    &self.bunching_num_flop[player]
+                } else if node.river == NOT_DEALT {
+                    &self.bunching_num_turn[player][node.turn as usize]
+                } else {
+                    &self.bunching_num_river[player][card_pair_to_index(node.turn, node.river)]
+                };
+
+                let mut weights_buf = Vec::new();
+                let weights = if self.turn_swap.is_none() && self.river_swap.is_none() {
+                    &mut self.weights[player]
+                } else {
+                    weights_buf.extend_from_slice(&self.weights[player]);
+                    self.apply_swap(&mut weights_buf, player, true);
+                    &mut weights_buf
+                };
+
+                for (w, &index) in weights.iter_mut().zip(indices.iter()) {
+                    if index == 0 {
+                        *w = 0.0;
+                    } else {
+                        let slice = &self.bunching_arena[index..index + opponent_len];
+                        if slice.iter().all(|&n| n == 0.0) {
+                            *w = 0.0;
+                        }
+                    }
+                }
+
+                if self.turn_swap.is_some() || self.river_swap.is_some() {
+                    self.apply_swap(&mut weights_buf, player, false);
+                    self.weights[player].copy_from_slice(&weights_buf);
+                }
+            }
         }
     }
 
@@ -1038,10 +1159,18 @@ impl PostFlopGame {
     }
 
     /// Internal method for calculating the equity.
-    fn equity_bunching_internal(&self, player: usize) -> Vec<f32> {
+    fn equity_internal_bunching(&self, player: usize) -> Vec<f32> {
+        let mut weights_buf = Vec::new();
+        let opponent_weights = if self.turn_swap.is_none() && self.river_swap.is_none() {
+            &self.weights[player ^ 1]
+        } else {
+            weights_buf.extend_from_slice(&self.weights[player ^ 1]);
+            self.apply_swap(&mut weights_buf, player ^ 1, true);
+            &weights_buf
+        };
+
         let node = self.node();
-        let opponent_weights = &self.weights[player ^ 1];
-        let opponent_len = self.private_cards[player ^ 1].len();
+        let opponent_len = opponent_weights.len();
 
         if node.river == NOT_DEALT {
             let indices = if node.turn != NOT_DEALT {

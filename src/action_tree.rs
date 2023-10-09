@@ -2,11 +2,11 @@ use crate::bet_size::*;
 use crate::mutex_like::*;
 
 #[cfg(feature = "bincode")]
-use bincode::{error::DecodeError, Decode, Encode};
+use bincode::{Decode, Encode};
 
 pub(crate) const PLAYER_OOP: u8 = 0;
 pub(crate) const PLAYER_IP: u8 = 1;
-pub(crate) const PLAYER_CHANCE: u8 = 2;
+pub(crate) const PLAYER_CHANCE: u8 = 2; // only used with `PLAYER_CHANCE_FLAG`
 pub(crate) const PLAYER_MASK: u8 = 3;
 pub(crate) const PLAYER_CHANCE_FLAG: u8 = 4; // chance_player = PLAYER_CHANCE_FLAG | prev_player
 pub(crate) const PLAYER_TERMINAL_FLAG: u8 = 8;
@@ -81,7 +81,7 @@ pub enum BoardState {
 #[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "bincode", derive(Decode, Encode))]
 pub struct TreeConfig {
-    /// Initial state of the game (flop, turn, or river).
+    /// Initial state of the game tree (flop, turn, or river).
     pub initial_state: BoardState,
 
     /// Starting pot size. Must be greater than `0`.
@@ -142,9 +142,8 @@ pub struct ActionTree {
     history: Vec<Action>,
 }
 
-// automatic derive of `Decode` does not work (2.0.0-rc.2)
 #[derive(Default)]
-#[cfg_attr(feature = "bincode", derive(Encode))]
+#[cfg_attr(feature = "bincode", derive(Decode, Encode))]
 pub(crate) struct ActionTreeNode {
     pub(crate) player: u8,
     pub(crate) board_state: BoardState,
@@ -155,6 +154,7 @@ pub(crate) struct ActionTreeNode {
 
 struct BuildTreeInfo {
     prev_action: Action,
+    num_bets: i32,
     allin_flag: bool,
     oop_call_flag: bool,
     stack: [i32; 2],
@@ -565,7 +565,7 @@ impl ActionTree {
                         actions.push(Action::Bet(amount));
                     }
                     BetSize::PrevBetRelative(_) => panic!("Unexpected `PrevBetRelative`"),
-                    BetSize::Additive(adder) => actions.push(Action::Bet(adder)),
+                    BetSize::Additive(adder, _) => actions.push(Action::Bet(adder)),
                     BetSize::Geometric(num_streets, max_ratio) => {
                         let num_streets = match num_streets {
                             0 => num_remaining_streets,
@@ -597,7 +597,7 @@ impl ActionTree {
                         actions.push(Action::Bet(amount));
                     }
                     BetSize::PrevBetRelative(_) => panic!("Unexpected `PrevBetRelative`"),
-                    BetSize::Additive(adder) => actions.push(Action::Bet(adder)),
+                    BetSize::Additive(adder, _) => actions.push(Action::Bet(adder)),
                     BetSize::Geometric(num_streets, max_ratio) => {
                         let num_streets = match num_streets {
                             0 => num_remaining_streets,
@@ -633,13 +633,15 @@ impl ActionTree {
                             let amount = (prev_amount as f64 * ratio).round() as i32;
                             actions.push(Action::Raise(amount));
                         }
-                        BetSize::Additive(adder) => {
-                            actions.push(Action::Raise(prev_amount + adder));
+                        BetSize::Additive(adder, raise_cap) => {
+                            if raise_cap == 0 || info.num_bets <= raise_cap {
+                                actions.push(Action::Raise(prev_amount + adder));
+                            }
                         }
                         BetSize::Geometric(num_streets, max_ratio) => {
                             let num_streets = match num_streets {
-                                0 => num_remaining_streets,
-                                _ => num_streets,
+                                0 => i32::max(num_remaining_streets - info.num_bets + 1, 1),
+                                _ => i32::max(num_streets - info.num_bets + 1, 1),
                             };
                             let amount = compute_geometric(num_streets, max_ratio);
                             actions.push(Action::Raise(prev_amount + amount));
@@ -986,6 +988,7 @@ impl BuildTreeInfo {
     fn new(stack: i32) -> Self {
         Self {
             prev_action: Action::None,
+            num_bets: 0,
             allin_flag: false,
             oop_call_flag: false,
             stack: [stack, stack],
@@ -995,6 +998,7 @@ impl BuildTreeInfo {
 
     #[inline]
     fn create_next(&self, player: u8, action: Action) -> Self {
+        let mut num_bets = self.num_bets;
         let mut allin_flag = self.allin_flag;
         let mut oop_call_flag = self.oop_call_flag;
         let mut stack = self.stack;
@@ -1005,12 +1009,14 @@ impl BuildTreeInfo {
                 oop_call_flag = false;
             }
             Action::Call => {
+                num_bets = 0;
                 oop_call_flag = player == PLAYER_OOP;
                 stack[player as usize] = stack[player as usize ^ 1];
                 prev_amount = 0;
             }
             Action::Bet(amount) | Action::Raise(amount) | Action::AllIn(amount) => {
                 let to_call = stack[player as usize] - stack[player as usize ^ 1];
+                num_bets += 1;
                 allin_flag = matches!(action, Action::AllIn(_));
                 stack[player as usize] -= amount - prev_amount + to_call;
                 prev_amount = amount;
@@ -1020,6 +1026,7 @@ impl BuildTreeInfo {
 
         BuildTreeInfo {
             prev_action: action,
+            num_bets,
             allin_flag,
             oop_call_flag,
             stack,
@@ -1028,20 +1035,7 @@ impl BuildTreeInfo {
     }
 }
 
-#[cfg(feature = "bincode")]
-impl Decode for ActionTreeNode {
-    #[inline]
-    fn decode<D: bincode::de::Decoder>(decoder: &mut D) -> Result<Self, DecodeError> {
-        Ok(ActionTreeNode {
-            player: Decode::decode(decoder)?,
-            board_state: Decode::decode(decoder)?,
-            amount: Decode::decode(decoder)?,
-            actions: Decode::decode(decoder)?,
-            children: Decode::decode(decoder)?,
-        })
-    }
-}
-
+/// Returns the number of action nodes of [flop, turn, river].
 pub(crate) fn count_num_action_nodes(node: &ActionTreeNode) -> [u64; 3] {
     let mut ret = [0, 0, 0];
     count_num_action_nodes_recursive(node, 0, &mut ret);
