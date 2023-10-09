@@ -1,5 +1,12 @@
 # postflop-solver
 
+> [!IMPORTANT]
+> **As of October 2023, I have started developing a poker solver as a business and have decided to suspend development of this open-source project. See [this issue] for more information.**
+
+[this issue]: https://github.com/b-inary/postflop-solver/issues/46
+
+---
+
 An open-source postflop solver library written in Rust
 
 Documentation: https://b-inary.github.io/postflop_solver/postflop_solver/
@@ -28,7 +35,7 @@ postflop-solver = { git = "https://github.com/b-inary/postflop-solver" }
 
 - Examples
 
-You can find use cases in [examples/basic.rs](examples/basic.rs).
+You can find examples in the [examples](examples) directory.
 
 If you have cloned this repository, you can run the example with the following command:
 
@@ -54,7 +61,7 @@ $ cargo run --release --example basic
 - **Bunching effect**: At the time of writing, this is the only implementation that can handle the bunching effect.
   It supports up to four folded players (6-max game).
   The implementation correctly counts the number of card combinations and does not rely on heuristics such as manipulating the probability distribution of the deck.
-  However, please note that enabling the bunching effect increases the time complexity of the evaluation at the terminal nodes and slows down the computation significantly.
+  Note, however, that enabling the bunching effect increases the time complexity of the evaluation at the terminal nodes and slows down the computation significantly.
 
 [Discounted CFR]: https://arxiv.org/abs/1809.04040
 
